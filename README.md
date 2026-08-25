@@ -18,6 +18,19 @@ On first run, journald prints the pairing ID and one-time code. Approve that req
 The release build must enable `linux-audio` and use the repository's generic `x86-64` rustflags:
 
 ```bash
-cargo build --release --features linux-audio
-cargo deb --no-build
+sudo apt-get update
+sudo apt-get install --no-install-recommends \
+  build-essential pkg-config libasound2-dev \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+cargo install cargo-deb --locked
+./packaging/build-deb.sh
 ```
+
+The package and a `SHA256SUMS` file are written to `target/debian/`. Install it with:
+
+```bash
+sudo apt install ./target/debian/kma-audio-agent_0.0.0-1_amd64.deb
+sudo systemctl enable --now kma-audio-agent
+```
+
+GitHub Actions runs the same checks and produces a `kma-audio-agent-debian-amd64` artifact for `v*` tag pushes or a manual `workflow_dispatch` run. The workflow builds on Ubuntu amd64 with `target-cpu=x86-64`; it does not replace FLOW 8/J1900 hardware acceptance.

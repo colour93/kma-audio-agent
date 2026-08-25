@@ -1,0 +1,78 @@
+name: KMA Audio Agent Debian package
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: Build Debian amd64 package
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Debian build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            libasound2-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            pkg-config
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Run checks
+        run: |
+          cargo fmt --check
+          cargo test --locked --features linux-audio
+          cargo clippy --locked --all-targets --features linux-audio -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --locked --release --features linux-audio
+
+      - name: Build and inspect Debian package
+        shell: bash
+        run: |
+          mkdir -p target/debian
+          cargo deb --locked --no-build --output target/debian
+          package=(target/debian/kma-audio-agent_*.deb)
+          test "${#package[@]}" -eq 1
+          dpkg-deb --info "${package[0]}"
+          dpkg-deb --contents "${package[0]}"
+          sha256sum "${package[0]}" > target/debian/SHA256SUMS
+
+      - name: Upload Debian artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kma-audio-agent-debian-amd64
+          path: |
+            target/debian/*.deb
+            target/debian/SHA256SUMS
+          if-no-files-found: error
