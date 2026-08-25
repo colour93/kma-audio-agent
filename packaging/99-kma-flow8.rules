@@ -1,0 +1,1 @@
+SUBSYSTEM=="sound", ATTRS{idVendor}=="1397", GROUP="audio", MODE="0660", TAG+="systemd"

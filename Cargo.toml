@@ -1,0 +1,54 @@
+[package]
+name = "kma-audio-agent"
+version = "0.0.0"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[features]
+default = []
+linux-audio = ["dep:alsa", "dep:gstreamer", "dep:gstreamer-app", "dep:midir"]
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+hostname = "0.4"
+mdns-sd = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.47", features = ["fs", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2.5"
+uuid = { version = "1.18", features = ["serde", "v4"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = { version = "0.9", optional = true }
+gstreamer = { version = "0.24", optional = true }
+gstreamer-app = { version = "0.24", optional = true }
+midir = { version = "0.10", optional = true }
+
+[dev-dependencies]
+tempfile = "3.21"
+
+[package.metadata.deb]
+maintainer = "KMA"
+section = "sound"
+priority = "optional"
+depends = "$auto, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav, libasound2"
+features = ["linux-audio"]
+assets = [
+  ["target/release/kma-audio-agent", "usr/bin/", "755"],
+  ["packaging/kma-audio-agent.service", "lib/systemd/system/", "644"],
+  ["packaging/config.toml", "etc/kma-audio-agent/config.toml", "640"],
+  ["packaging/99-kma-flow8.rules", "lib/udev/rules.d/", "644"],
+]
+maintainer-scripts = "packaging/debian"
+systemd-units = { unit-name = "kma-audio-agent", enable = false, start = false }

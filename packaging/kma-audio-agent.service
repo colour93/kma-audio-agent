@@ -1,0 +1,24 @@
+[Unit]
+Description=KMA FLOW 8 Audio Agent
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kma-audio-agent
+Group=kma-audio-agent
+SupplementaryGroups=audio
+ExecStart=/usr/bin/kma-audio-agent --config /etc/kma-audio-agent/config.toml run
+Restart=always
+RestartSec=1
+StateDirectory=kma-audio-agent
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kma-audio-agent
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

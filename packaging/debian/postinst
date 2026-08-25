@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+if ! getent group kma-audio-agent >/dev/null; then
+  addgroup --system kma-audio-agent
+fi
+if ! getent passwd kma-audio-agent >/dev/null; then
+  adduser --system --ingroup kma-audio-agent --home /var/lib/kma-audio-agent --no-create-home kma-audio-agent
+fi
+usermod -a -G audio kma-audio-agent
+install -d -o kma-audio-agent -g kma-audio-agent -m 0700 /var/lib/kma-audio-agent
+systemctl daemon-reload >/dev/null 2>&1 || true
+udevadm control --reload-rules >/dev/null 2>&1 || true

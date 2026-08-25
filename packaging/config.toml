@@ -1,0 +1,10 @@
+# Set this when mDNS can discover more than one KMA Server.
+# server_url = "http://192.168.1.10:8787"
+
+data_dir = "/var/lib/kma-audio-agent"
+room_id = "default"
+snapshot_slot = 15
+audio_device = "FLOW 8"
+midi_device = "FLOW 8"
+alsa_playback_device = "default"
+alsa_capture_device = "default"
