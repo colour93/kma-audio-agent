@@ -1,6 +1,4 @@
 #!/bin/sh
 set -e
 
-if [ "$1" = "remove" ]; then
-  systemctl stop kma-audio-agent.service >/dev/null 2>&1 || true
-fi
+#DEBHELPER#

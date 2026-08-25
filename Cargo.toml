@@ -2,6 +2,7 @@
 name = "kma-audio-agent"
 version = "0.0.0"
 edition = "2024"
+description = "KMA FLOW 8 audio playback, recording, and mixer control agent"
 license = "UNLICENSED"
 publish = false
 
@@ -46,9 +47,8 @@ depends = "$auto, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreame
 features = ["linux-audio"]
 assets = [
   ["target/release/kma-audio-agent", "usr/bin/", "755"],
-  ["packaging/kma-audio-agent.service", "lib/systemd/system/", "644"],
   ["packaging/config.toml", "etc/kma-audio-agent/config.toml", "644"],
   ["packaging/99-kma-flow8.rules", "lib/udev/rules.d/", "644"],
 ]
 maintainer-scripts = "packaging/debian"
-systemd-units = { unit-name = "kma-audio-agent", enable = false, start = false }
+systemd-units = { unit-scripts = "packaging", unit-name = "kma-audio-agent", enable = false, start = false }

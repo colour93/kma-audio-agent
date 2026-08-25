@@ -9,5 +9,6 @@ if ! getent passwd kma-audio-agent >/dev/null; then
 fi
 usermod -a -G audio kma-audio-agent
 install -d -o kma-audio-agent -g kma-audio-agent -m 0700 /var/lib/kma-audio-agent
-systemctl daemon-reload >/dev/null 2>&1 || true
 udevadm control --reload-rules >/dev/null 2>&1 || true
+
+#DEBHELPER#
