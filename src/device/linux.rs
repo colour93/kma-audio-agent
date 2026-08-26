@@ -16,7 +16,9 @@ use gstreamer::{self as gst, prelude::*};
 use gstreamer_app as gst_app;
 use midir::MidiOutput;
 
-use super::{AudioDevice, HealthItem, ProbeReport, RecordingArtifact, RecordingStart};
+use super::{
+    AudioDevice, HealthItem, ProbeReport, RecordingArtifact, RecordingStart, find_calibration_peak,
+};
 use crate::{
     config::Config,
     midi::{mixer_messages, snapshot_program},
@@ -230,8 +232,8 @@ impl AudioDevice for Flow8Device {
                     let mut output = capture_samples.lock().map_err(|_| gst::FlowError::Error)?;
                     output.extend(
                         map.as_slice()
-                            .chunks_exact(DEVICE_CAPTURE_FRAME_BYTES)
-                            .map(|frame| i32::from_le_bytes(frame[0..4].try_into().unwrap())),
+                            .chunks_exact(size_of::<i32>())
+                            .map(|sample| i32::from_le_bytes(sample.try_into().unwrap())),
                     );
                     Ok(gst::FlowSuccess::Ok)
                 })
@@ -243,7 +245,8 @@ impl AudioDevice for Flow8Device {
         let pipeline_error = bus.and_then(|bus| {
             while let Some(message) = bus.pop() {
                 if let gst::MessageView::Error(error) = message.view() {
-                    return Some(error.error().to_string());
+                    let debug = error.debug().unwrap_or_default();
+                    return Some(format!("{}; debug: {debug}", error.error()));
                 }
             }
             None
@@ -255,18 +258,26 @@ impl AudioDevice for Flow8Device {
         let samples = samples
             .lock()
             .map_err(|_| anyhow!("calibration buffer poisoned"))?;
-        let (peak_frame, peak) = samples
-            .iter()
-            .enumerate()
-            .skip(4_800)
-            .max_by_key(|(_, sample)| sample.unsigned_abs())
+        let peak = find_calibration_peak(&samples, DEVICE_CAPTURE_CHANNELS as usize, 4_800)
             .ok_or_else(|| anyhow!("no calibration samples captured"))?;
+        let peak_amplitude = peak.sample.unsigned_abs();
         anyhow::ensure!(
-            peak.unsigned_abs() > i32::MAX as u32 / 20,
-            "calibration pulse not detected"
+            peak_amplitude > i32::MAX as u32 / 20,
+            "calibration pulse not detected: strongest capture channel={}, peak={} ({:.2}% full scale), channel peaks={:?}; verify FLOW 8 USB playback is routed back to USB capture",
+            peak.channel + 1,
+            peak_amplitude,
+            peak_amplitude as f64 * 100.0 / i32::MAX as f64,
+            peak.channel_peaks,
         );
-        let expected = ((peak_frame as i64 + 24_000) / 48_000) * 48_000;
-        Ok(peak_frame as i64 - expected)
+        tracing::info!(
+            capture_channel = peak.channel + 1,
+            peak = peak_amplitude,
+            peak_percent = peak_amplitude as f64 * 100.0 / i32::MAX as f64,
+            frame = peak.frame,
+            "calibration pulse detected"
+        );
+        let expected = ((peak.frame as i64 + 24_000) / 48_000) * 48_000;
+        Ok(peak.frame as i64 - expected)
     }
 
     async fn apply_mixer(&mut self, state: &MixerState, snapshot_slot: u8) -> Result<()> {
