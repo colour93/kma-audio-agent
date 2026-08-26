@@ -237,9 +237,21 @@ impl AudioDevice for Flow8Device {
                 })
                 .build(),
         );
+        let bus = pipeline.bus();
         pipeline.set_state(gst::State::Playing)?;
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let pipeline_error = bus.and_then(|bus| {
+            while let Some(message) = bus.pop() {
+                if let gst::MessageView::Error(error) = message.view() {
+                    return Some(error.error().to_string());
+                }
+            }
+            None
+        });
         pipeline.set_state(gst::State::Null)?;
+        if let Some(error) = pipeline_error {
+            return Err(anyhow!("calibration pipeline error: {error}"));
+        }
         let samples = samples
             .lock()
             .map_err(|_| anyhow!("calibration buffer poisoned"))?;
