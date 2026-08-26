@@ -43,7 +43,7 @@ tempfile = "3.21"
 maintainer = "KMA"
 section = "sound"
 priority = "optional"
-depends = "$auto, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav, libasound2t64 | libasound2"
+depends = "$auto, gstreamer1.0-alsa, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav, libasound2t64 | libasound2"
 features = ["linux-audio"]
 assets = [
   ["target/release/kma-audio-agent", "usr/bin/", "755"],

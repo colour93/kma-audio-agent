@@ -322,7 +322,7 @@ async fn connect_and_run(
         "version": VERSION,
         "platform": "linux-amd64",
         "sampleRate": 48_000,
-        "captureChannels": 2,
+        "captureChannels": 10,
         "formats": ["mp3", "flac"],
     });
     send_agent(

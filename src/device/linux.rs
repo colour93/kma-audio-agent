@@ -22,9 +22,26 @@ use crate::{
     midi::{mixer_messages, snapshot_program},
     protocol::{MixerState, PlaybackAction, PlaybackCommand},
     recording::{
-        CHANNELS, RecordingState, SAMPLE_RATE, SparseTimeline, SpoolManifest, capture_to_song_frame,
+        CHANNELS, DEVICE_CAPTURE_CHANNELS, RecordingState, SAMPLE_RATE, SparseTimeline,
+        SpoolManifest, capture_to_song_frame,
     },
 };
+
+const DEVICE_CAPTURE_FRAME_BYTES: usize = DEVICE_CAPTURE_CHANNELS as usize * size_of::<i32>();
+
+// FLOW 8's first two USB capture channels are Mic1 and Mic2. Keep only those
+// channels in the recording spool; the remaining channels are mixer returns.
+fn select_mic_channels(bytes: &[u8]) -> Vec<i32> {
+    bytes
+        .chunks_exact(DEVICE_CAPTURE_FRAME_BYTES)
+        .flat_map(|frame| {
+            [
+                i32::from_le_bytes(frame[0..4].try_into().unwrap()),
+                i32::from_le_bytes(frame[4..8].try_into().unwrap()),
+            ]
+        })
+        .collect()
+}
 
 struct CaptureSession {
     pipeline: gst::Pipeline,
@@ -182,7 +199,7 @@ impl AudioDevice for Flow8Device {
             recording,
             sample_rate: SAMPLE_RATE,
             playback_channels: 2,
-            capture_channels: CHANNELS,
+            capture_channels: DEVICE_CAPTURE_CHANNELS,
             snapshot_slot: config.snapshot_slot,
         }
     }
@@ -194,7 +211,7 @@ impl AudioDevice for Flow8Device {
         let samples = Arc::new(Mutex::new(Vec::<i32>::new()));
         let capture_samples = Arc::clone(&samples);
         let description = format!(
-            "audiotestsrc is-live=true wave=ticks samplesperbuffer=256 ! audioconvert ! audio/x-raw,format=S32LE,rate=48000,channels=2 ! alsasink device=\"{}\" sync=true alsasrc device=\"{}\" ! audio/x-raw,format=S32LE,rate=48000,channels=2 ! appsink name=calibration sync=false",
+            "audiotestsrc is-live=true wave=ticks samplesperbuffer=256 ! audioconvert ! audio/x-raw,format=S32LE,rate=48000,channels=2 ! alsasink device=\"{}\" sync=true alsasrc device=\"{}\" ! audio/x-raw,format=S32LE,rate=48000,channels=10 ! appsink name=calibration sync=false",
             config.alsa_playback_device, config.alsa_capture_device
         );
         let pipeline = gst::parse::launch(&description)?
@@ -213,9 +230,7 @@ impl AudioDevice for Flow8Device {
                     let mut output = capture_samples.lock().map_err(|_| gst::FlowError::Error)?;
                     output.extend(
                         map.as_slice()
-                            .as_chunks::<{ size_of::<i32>() * CHANNELS as usize }>()
-                            .0
-                            .iter()
+                            .chunks_exact(DEVICE_CAPTURE_FRAME_BYTES)
                             .map(|frame| i32::from_le_bytes(frame[0..4].try_into().unwrap())),
                     );
                     Ok(gst::FlowSuccess::Ok)
@@ -337,7 +352,7 @@ impl AudioDevice for Flow8Device {
         let callback_paused = Arc::clone(&paused);
         let offset = request.playback_to_capture_offset_frames;
         let description = format!(
-            "alsasrc device=\"{}\" provide-clock=true ! audio/x-raw,format=S32LE,rate=48000,channels=2,layout=interleaved ! appsink name=capture sync=false max-buffers=16 drop=false",
+            "alsasrc device=\"{}\" provide-clock=true ! audio/x-raw,format=S32LE,rate=48000,channels=10,layout=interleaved ! appsink name=capture sync=false max-buffers=16 drop=false",
             self.config.alsa_capture_device
         );
         let pipeline = gst::parse::launch(&description)?
@@ -356,16 +371,10 @@ impl AudioDevice for Flow8Device {
                     if callback_paused.load(Ordering::Acquire) {
                         return Ok(gst::FlowSuccess::Ok);
                     }
-                    let frames = map.size() as u64 / 8;
+                    let frames = (map.size() / DEVICE_CAPTURE_FRAME_BYTES) as u64;
                     let capture_frame = callback_cursor.fetch_add(frames, Ordering::AcqRel);
                     let destination = capture_to_song_frame(capture_frame, offset);
-                    let samples = map
-                        .as_slice()
-                        .as_chunks::<{ size_of::<i32>() }>()
-                        .0
-                        .iter()
-                        .map(|sample| i32::from_le_bytes(*sample))
-                        .collect::<Vec<_>>();
+                    let samples = select_mic_channels(map.as_slice());
                     callback_timeline
                         .lock()
                         .map_err(|_| gst::FlowError::Error)?
@@ -481,5 +490,26 @@ impl AudioDevice for Flow8Device {
             SAMPLE_RATE,
             self.started_at.elapsed().as_millis() as u64,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_mic_one_and_two_from_ten_channel_frames() {
+        let mut bytes = Vec::new();
+        let frames: [[i32; 10]; 2] = [
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+        ];
+        for frame in frames {
+            for sample in frame {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+
+        assert_eq!(select_mic_channels(&bytes), vec![11, 12, 21, 22]);
     }
 }

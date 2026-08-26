@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 2;
+/// FLOW 8 exposes ten capture channels in Recording USB mode.
+pub const DEVICE_CAPTURE_CHANNELS: u16 = 10;
 const BYTES_PER_FRAME: u64 = CHANNELS as u64 * size_of::<i32>() as u64;
 
 pub fn capture_to_song_frame(capture_frame: u64, offset_frames: i64) -> u64 {
