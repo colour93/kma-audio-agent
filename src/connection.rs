@@ -379,13 +379,13 @@ async fn connect_and_run(
                         anchor_monotonic_ms: monotonic_ms,
                     }).await?;
                     if ended {
-                        if let Some(recording_id) = state.active_recording.take()
-                            && let Some(artifact) = device.finish_recording(&recording_id, false).await?
-                        {
-                            artifacts.insert(recording_id.clone(), artifact);
-                            let artifact = &artifacts[&recording_id];
-                            send_recording_status(&mut socket, artifact, "encoding", None).await?;
-                            request_upload(&mut socket, artifact).await?;
+                        if let Some(recording_id) = state.active_recording.take() {
+                            finish_recording_for_upload(
+                                &mut socket,
+                                device,
+                                artifacts,
+                                &recording_id,
+                            ).await?;
                         }
                         state.active_command = None;
                     }
@@ -418,13 +418,32 @@ async fn connect_and_run(
                             ApplyResult::Apply => {}
                         }
                         if command.previous_recording_disposition.as_deref() == Some("save") {
-                            if let Some(recording_id) = command.previous_recording_session_id.as_deref()
-                                && let Some(artifact) = device.finish_recording(recording_id, false).await?
+                            if let Some(recording_id) = command.previous_recording_session_id.as_deref() {
+                                finish_recording_for_upload(
+                                    &mut socket,
+                                    device,
+                                    artifacts,
+                                    recording_id,
+                                ).await?;
+                            }
+                            state.active_recording = None;
+                        }
+                        if command.previous_recording_disposition.as_deref() == Some("discard") {
+                            if let Some(recording_id) =
+                                command.previous_recording_session_id.as_deref()
                             {
-                                artifacts.insert(recording_id.to_owned(), artifact);
-                                let artifact = &artifacts[recording_id];
-                                send_recording_status(&mut socket, artifact, "encoding", None).await?;
-                                request_upload(&mut socket, artifact).await?;
+                                device.cancel_recording(recording_id).await?;
+                                send_agent(
+                                    &mut socket,
+                                    &AgentMessage::RecordingStatus {
+                                        schema_version: SCHEMA_VERSION,
+                                        recording_session_id: recording_id,
+                                        state: "discarded",
+                                        max_frame: 0,
+                                        error: None,
+                                    },
+                                )
+                                .await?;
                             }
                             state.active_recording = None;
                         }
@@ -441,26 +460,45 @@ async fn connect_and_run(
                             }
                             state.active_recording = None;
                         }
+                        let mut started_recording_id = None;
                         if matches!(command.action, PlaybackAction::Play)
                             && let Some(directive) = &command.recording
                             && directive.enabled
                             && let Some(recording_id) = &directive.recording_session_id
                         {
                             if let Some(calibration) = calibration {
-                                device.start_recording(RecordingStart {
+                                match device.start_recording(RecordingStart {
                                     recording_session_id: recording_id.clone(),
                                     queue_item_id: command.queue_item_id.clone().unwrap_or_default(),
                                     spool_dir: config.spool_dir(),
                                     playback_to_capture_offset_frames: calibration.playback_to_capture_offset_frames,
-                                }).await?;
-                                state.active_recording = Some(recording_id.clone());
-                                send_agent(&mut socket, &AgentMessage::RecordingStatus {
-                                    schema_version: SCHEMA_VERSION,
-                                    recording_session_id: recording_id,
-                                    state: "recording",
-                                    max_frame: 0,
-                                    error: None,
-                                }).await?;
+                                }).await {
+                                    Ok(()) => {
+                                        state.active_recording = Some(recording_id.clone());
+                                        started_recording_id = Some(recording_id.clone());
+                                        send_agent(&mut socket, &AgentMessage::RecordingStatus {
+                                            schema_version: SCHEMA_VERSION,
+                                            recording_session_id: recording_id,
+                                            state: "recording",
+                                            max_frame: 0,
+                                            error: None,
+                                        }).await?;
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            recording_session_id = recording_id,
+                                            error = %error,
+                                            "failed to start recording"
+                                        );
+                                        send_agent(&mut socket, &AgentMessage::RecordingStatus {
+                                            schema_version: SCHEMA_VERSION,
+                                            recording_session_id: recording_id,
+                                            state: "failed",
+                                            max_frame: 0,
+                                            error: Some("recording_start_failed"),
+                                        }).await?;
+                                    }
+                                }
                             } else {
                                 send_agent(&mut socket, &AgentMessage::RecordingStatus {
                                     schema_version: SCHEMA_VERSION,
@@ -482,6 +520,23 @@ async fn connect_and_run(
                             }
                             Err(error) => {
                                 let error = error.to_string();
+                                if let Some(recording_id) = started_recording_id.as_deref() {
+                                    if let Err(cancel_error) = device.cancel_recording(recording_id).await {
+                                        tracing::warn!(
+                                            recording_session_id = recording_id,
+                                            error = %cancel_error,
+                                            "failed to cancel recording after playback error"
+                                        );
+                                    }
+                                    state.active_recording = None;
+                                    send_agent(&mut socket, &AgentMessage::RecordingStatus {
+                                        schema_version: SCHEMA_VERSION,
+                                        recording_session_id: recording_id,
+                                        state: "failed",
+                                        max_frame: 0,
+                                        error: Some("playback_start_failed"),
+                                    }).await?;
+                                }
                                 send_agent(&mut socket, &AgentMessage::PlaybackError {
                                     schema_version: SCHEMA_VERSION,
                                     command_id: &command.command_id,
@@ -562,6 +617,42 @@ async fn send_recording_status(
         },
     )
     .await
+}
+
+async fn finish_recording_for_upload(
+    socket: &mut Socket,
+    device: &mut dyn AudioDevice,
+    artifacts: &mut HashMap<String, RecordingArtifact>,
+    recording_id: &str,
+) -> Result<()> {
+    match device.finish_recording(recording_id, false).await {
+        Ok(Some(artifact)) => {
+            artifacts.insert(recording_id.to_owned(), artifact);
+            let artifact = &artifacts[recording_id];
+            send_recording_status(socket, artifact, "encoding", None).await?;
+            request_upload(socket, artifact).await?;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                recording_session_id = recording_id,
+                error = %error,
+                "failed to finish recording"
+            );
+            send_agent(
+                socket,
+                &AgentMessage::RecordingStatus {
+                    schema_version: SCHEMA_VERSION,
+                    recording_session_id: recording_id,
+                    state: "failed",
+                    max_frame: 0,
+                    error: Some("recording_encode_failed"),
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn request_upload(socket: &mut Socket, artifact: &RecordingArtifact) -> Result<()> {

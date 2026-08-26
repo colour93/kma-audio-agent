@@ -154,10 +154,12 @@ impl Flow8Device {
     }
 
     fn encode_flac(raw_path: &std::path::Path, flac_path: &std::path::Path) -> Result<()> {
+        let temporary = flac_path.with_extension("flac.part");
+        let _ = fs::remove_file(&temporary);
         let description = format!(
-            "filesrc location=\"{}\" ! rawaudioparse format=s32le sample-rate=48000 num-channels=2 interleaved=true ! audioconvert ! flacenc ! filesink location=\"{}\"",
+            "filesrc location=\"{}\" ! rawaudioparse format=pcm pcm-format=s32le sample-rate=48000 num-channels=2 interleaved=true ! audioconvert ! flacenc ! filesink location=\"{}\"",
             raw_path.display(),
-            flac_path.display()
+            temporary.display()
         );
         let pipeline = gst::parse::launch(&description)?
             .downcast::<gst::Pipeline>()
@@ -171,12 +173,14 @@ impl Flow8Device {
                 gst::MessageView::Eos(..) => break,
                 gst::MessageView::Error(error) => {
                     pipeline.set_state(gst::State::Null)?;
+                    let _ = fs::remove_file(&temporary);
                     return Err(anyhow!(error.error().to_string()));
                 }
                 _ => {}
             }
         }
         pipeline.set_state(gst::State::Null)?;
+        fs::rename(temporary, flac_path)?;
         Ok(())
     }
 }
@@ -420,7 +424,13 @@ impl AudioDevice for Flow8Device {
             interrupted: false,
         };
         manifest.store(&manifest_path)?;
-        pipeline.set_state(gst::State::Playing)?;
+        if let Err(error) = pipeline.set_state(gst::State::Playing) {
+            let _ = pipeline.set_state(gst::State::Null);
+            let _ = fs::remove_file(&manifest.raw_path);
+            let _ = fs::remove_file(&manifest.flac_path);
+            let _ = fs::remove_file(&manifest_path);
+            return Err(error.into());
+        }
         self.captures.insert(
             request.recording_session_id,
             CaptureSession {
@@ -487,6 +497,16 @@ impl AudioDevice for Flow8Device {
         &mut self,
         manifest: &SpoolManifest,
     ) -> Result<Option<RecordingArtifact>> {
+        if fs::metadata(&manifest.raw_path)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true)
+        {
+            let _ = fs::remove_file(&manifest.raw_path);
+            let _ = fs::remove_file(&manifest.flac_path);
+            let _ = fs::remove_file(manifest.raw_path.with_extension("flac.part"));
+            let _ = fs::remove_file(manifest.raw_path.with_extension("json"));
+            return Ok(None);
+        }
         if !manifest.flac_path.exists() {
             Self::encode_flac(&manifest.raw_path, &manifest.flac_path)?;
         }
