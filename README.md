@@ -6,6 +6,8 @@
 
 The FLOW 8 must use Recording USB mode at 48 kHz. Install the package, edit `/etc/kma-audio-agent/config.toml`, then run:
 
+`alsa_playback_device` must name a shared ALSA PCM because seamless original/instrumental switching briefly runs two playback pipelines. Use `default` or a card-specific alias such as `default:CARD=F8`; direct `hw:` and `plughw:` playback devices are exclusive and are rejected. The capture device may still use `hw:`.
+
 ```bash
 sudo -u kma-audio-agent kma-audio-agent probe
 sudo -u kma-audio-agent kma-audio-agent calibrate

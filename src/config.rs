@@ -50,15 +50,27 @@ impl Default for Config {
 }
 
 impl Config {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            (1..=15).contains(&self.snapshot_slot),
+            "snapshot_slot must be between 1 and 15"
+        );
+        let playback_device = self.alsa_playback_device.trim();
+        anyhow::ensure!(
+            !matches!(playback_device, "hw" | "plughw")
+                && !playback_device.starts_with("hw:")
+                && !playback_device.starts_with("plughw:"),
+            "alsa_playback_device must use a shared ALSA PCM (for example default or default:CARD=F8); hw and plughw devices are exclusive and prevent seamless source switching"
+        );
+        Ok(())
+    }
+
     pub async fn load(path: &Path) -> Result<Self> {
         let raw = tokio::fs::read_to_string(path)
             .await
             .with_context(|| format!("read config {}", path.display()))?;
         let config: Self = toml::from_str(&raw).context("parse config")?;
-        anyhow::ensure!(
-            (1..=15).contains(&config.snapshot_slot),
-            "snapshot_slot must be between 1 and 15"
-        );
+        config.validate()?;
         Ok(config)
     }
 
@@ -81,5 +93,33 @@ impl Config {
 
     pub fn spool_dir(&self) -> PathBuf {
         self.data_dir.join("spool")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn accepts_shared_playback_device() {
+        for device in ["default", "default:CARD=F8", "dmix:CARD=F8,DEV=0"] {
+            let config = Config {
+                alsa_playback_device: device.to_owned(),
+                ..Config::default()
+            };
+            assert!(config.validate().is_ok(), "device={device}");
+        }
+    }
+
+    #[test]
+    fn rejects_exclusive_playback_device() {
+        for device in ["hw", "hw:CARD=F8,DEV=0", "plughw:CARD=F8,DEV=0"] {
+            let config = Config {
+                alsa_playback_device: device.to_owned(),
+                ..Config::default()
+            };
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("shared ALSA PCM"), "device={device}");
+        }
     }
 }
