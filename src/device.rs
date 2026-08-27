@@ -157,7 +157,11 @@ pub trait AudioDevice: Send {
         &mut self,
         manifest: &SpoolManifest,
     ) -> Result<Option<RecordingArtifact>>;
-    fn anchor(&self) -> Option<(u64, u32, u64)>;
+    fn anchor(&mut self) -> Option<(u64, u32, u64)>;
+
+    fn playback_state(&self) -> &'static str {
+        "playing"
+    }
 }
 
 pub fn create_device(
@@ -235,7 +239,7 @@ impl AudioDevice for UnsupportedDevice {
         Ok(None)
     }
 
-    fn anchor(&self) -> Option<(u64, u32, u64)> {
+    fn anchor(&mut self) -> Option<(u64, u32, u64)> {
         None
     }
 }

@@ -368,11 +368,12 @@ async fn connect_and_run(
                     (state.active_command.as_ref(), device.anchor())
                 {
                     let ended = *duration_ms > 0 && frame >= *duration_ms * rate as u64 / 1_000;
+                    let playback_state = device.playback_state();
                     send_agent(&mut socket, &AgentMessage::PlaybackStatus {
                         schema_version: SCHEMA_VERSION,
                         command_id,
                         route_epoch: *route_epoch,
-                        state: if ended { "ended" } else { "playing" },
+                        state: if ended { "ended" } else { playback_state },
                         sample_frame: frame,
                         sample_rate: rate,
                         duration_ms: *duration_ms,

@@ -69,6 +69,24 @@ pub fn mixer_messages(state: &MixerState) -> Vec<Vec<u8>> {
         ),
         cc(FX1_BUS_CHANNEL, 7, db_to_cc(state.reverb.return_level_db)),
     ];
+    push_monitor_sends(
+        &mut messages,
+        MIC1_CHANNEL,
+        state.mic1.mon1_send_db,
+        state.mic1.mon2_send_db,
+    );
+    push_monitor_sends(
+        &mut messages,
+        MIC2_CHANNEL,
+        state.mic2.mon1_send_db,
+        state.mic2.mon2_send_db,
+    );
+    push_monitor_sends(
+        &mut messages,
+        MUSIC_CHANNEL,
+        state.music.mon1_send_db,
+        state.music.mon2_send_db,
+    );
     if let Some(mon1) = &state.mon1 {
         messages.push(cc(
             MON1_BUS_CHANNEL,
@@ -84,6 +102,20 @@ pub fn mixer_messages(state: &MixerState) -> Vec<Vec<u8>> {
         ));
     }
     messages
+}
+
+fn push_monitor_sends(
+    messages: &mut Vec<Vec<u8>>,
+    channel: u8,
+    mon1_send_db: Option<f32>,
+    mon2_send_db: Option<f32>,
+) {
+    if let Some(level_db) = mon1_send_db {
+        messages.push(cc(channel, 14, db_to_cc(level_db)));
+    }
+    if let Some(level_db) = mon2_send_db {
+        messages.push(cc(channel, 15, db_to_cc(level_db)));
+    }
 }
 
 fn cc(channel: u8, controller: u8, value: u8) -> Vec<u8> {
@@ -119,9 +151,9 @@ mod tests {
     #[test]
     fn maps_outputs_and_fx_to_flow8_channels() {
         let state: MixerState = serde_json::from_value(serde_json::json!({
-            "mic1": { "levelDb": -18, "muted": false, "compressorPercent": 35, "reverbSendPercent": 25 },
-            "mic2": { "levelDb": -18, "muted": false, "compressorPercent": 35, "reverbSendPercent": 25 },
-            "music": { "levelDb": -6, "muted": false },
+            "mic1": { "levelDb": -18, "muted": false, "compressorPercent": 35, "reverbSendPercent": 25, "mon1SendDb": -9, "mon2SendDb": -15 },
+            "mic2": { "levelDb": -18, "muted": false, "compressorPercent": 35, "reverbSendPercent": 25, "mon1SendDb": -10, "mon2SendDb": -16 },
+            "music": { "levelDb": -6, "muted": false, "mon1SendDb": -11, "mon2SendDb": -17 },
             "main": { "levelDb": -3, "muted": false },
             "mon1": { "levelDb": -12, "muted": false },
             "mon2": { "levelDb": -20, "muted": true },
@@ -133,6 +165,12 @@ mod tests {
         assert!(messages.contains(&vec![0xB7, 7, db_to_cc(-3.0)]));
         assert!(messages.contains(&vec![0xB8, 7, db_to_cc(-12.0)]));
         assert!(messages.contains(&vec![0xB9, 7, 0]));
+        assert!(messages.contains(&vec![0xB0, 14, db_to_cc(-9.0)]));
+        assert!(messages.contains(&vec![0xB0, 15, db_to_cc(-15.0)]));
+        assert!(messages.contains(&vec![0xB1, 14, db_to_cc(-10.0)]));
+        assert!(messages.contains(&vec![0xB1, 15, db_to_cc(-16.0)]));
+        assert!(messages.contains(&vec![0xB6, 14, db_to_cc(-11.0)]));
+        assert!(messages.contains(&vec![0xB6, 15, db_to_cc(-17.0)]));
         assert!(messages.contains(&vec![0xCD, 14]));
         assert!(messages.contains(&vec![0xBA, 7, db_to_cc(-12.0)]));
     }
@@ -150,6 +188,8 @@ mod tests {
 
         assert_eq!(state.mon1, None);
         assert_eq!(state.mon2, None);
+        assert_eq!(state.mic1.mon1_send_db, None);
+        assert_eq!(state.music.mon2_send_db, None);
         let messages = mixer_messages(&state);
         assert!(!messages.iter().any(|message| message[0] == 0xB8));
         assert!(!messages.iter().any(|message| message[0] == 0xB9));

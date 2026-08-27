@@ -12,6 +12,10 @@ pub struct ChannelState {
     pub muted: bool,
     pub compressor_percent: f32,
     pub reverb_send_percent: f32,
+    #[serde(default)]
+    pub mon1_send_db: Option<f32>,
+    #[serde(default)]
+    pub mon2_send_db: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -19,7 +23,7 @@ pub struct ChannelState {
 pub struct MixerState {
     pub mic1: ChannelState,
     pub mic2: ChannelState,
-    pub music: LevelState,
+    pub music: InputLevelState,
     pub main: LevelState,
     #[serde(default)]
     pub mon1: Option<LevelState>,
@@ -33,6 +37,17 @@ pub struct MixerState {
 pub struct LevelState {
     pub level_db: f32,
     pub muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InputLevelState {
+    pub level_db: f32,
+    pub muted: bool,
+    #[serde(default)]
+    pub mon1_send_db: Option<f32>,
+    #[serde(default)]
+    pub mon2_send_db: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
