@@ -285,7 +285,7 @@ impl Flow8Device {
             return;
         };
         let PendingSwitch {
-            download,
+            mut download,
             position_ms,
         } = pending;
         if !download.is_finished() {
