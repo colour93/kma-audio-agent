@@ -31,6 +31,8 @@ use crate::{
 };
 
 const DEVICE_CAPTURE_FRAME_BYTES: usize = DEVICE_CAPTURE_CHANNELS as usize * size_of::<i32>();
+const HANDOFF_TOLERANCE_MS: u64 = 250;
+const PENDING_SEEK_TIMEOUT: Duration = Duration::from_secs(5);
 
 // FLOW 8's first two USB capture channels are Mic1 and Mic2. Keep only those
 // channels in the recording spool; the remaining channels are mixer returns.
@@ -60,6 +62,12 @@ struct PendingSwitch {
     position_ms: u64,
 }
 
+struct PendingPlayer {
+    player: gst::Element,
+    target_position_ms: u64,
+    seek_started_at: Option<Instant>,
+}
+
 pub struct Flow8Device {
     config: Config,
     server_url: String,
@@ -67,8 +75,7 @@ pub struct Flow8Device {
     client: reqwest::Client,
     player: Option<gst::Element>,
     pending_switch: Option<PendingSwitch>,
-    pending_player: Option<gst::Element>,
-    pending_position_ms: u64,
+    pending_player: Option<PendingPlayer>,
     paused: bool,
     active_command_id: Option<String>,
     captures: HashMap<String, CaptureSession>,
@@ -86,7 +93,6 @@ impl Flow8Device {
             player: None,
             pending_switch: None,
             pending_player: None,
-            pending_position_ms: 0,
             paused: true,
             active_command_id: None,
             captures: HashMap::new(),
@@ -201,8 +207,8 @@ impl Flow8Device {
     }
 
     fn stop_pending_player(&mut self) {
-        if let Some(player) = self.pending_player.take() {
-            Self::stop_player(player);
+        if let Some(pending) = self.pending_player.take() {
+            Self::stop_player(pending.player);
         }
     }
 
@@ -257,17 +263,12 @@ impl Flow8Device {
     fn prepare_player(
         &self,
         path: &std::path::Path,
-        position_ms: u64,
         paused: bool,
         volume: f64,
     ) -> Result<gst::Element> {
         let player = self.create_player(path, volume)?;
         let result = (|| {
             player.set_state(gst::State::Paused)?;
-            player.seek_simple(
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::ClockTime::from_mseconds(position_ms),
-            )?;
             if !paused {
                 player.set_state(gst::State::Playing)?;
             }
@@ -303,8 +304,14 @@ impl Flow8Device {
             return;
         };
         match result {
-            Ok(Ok(path)) => match self.prepare_player(&path, position_ms, self.paused, 0.0) {
-                Ok(player) => self.pending_player = Some(player),
+            Ok(Ok(path)) => match self.prepare_player(&path, self.paused, 0.0) {
+                Ok(player) => {
+                    self.pending_player = Some(PendingPlayer {
+                        player,
+                        target_position_ms: position_ms,
+                        seek_started_at: None,
+                    });
+                }
                 Err(error) => tracing::warn!(error = %error, "failed to prepare downloaded source"),
             },
             Ok(Err(error)) => tracing::warn!(error = %error, "failed to download pending source"),
@@ -313,13 +320,13 @@ impl Flow8Device {
     }
 
     fn promote_pending_player(&mut self) {
-        let Some(pending) = self.pending_player.take() else {
+        let Some(mut pending) = self.pending_player.take() else {
             return;
         };
-        let (state_result, current_state, _) = pending.state(gst::ClockTime::ZERO);
+        let (state_result, current_state, _) = pending.player.state(gst::ClockTime::ZERO);
         if let Err(error) = state_result {
             tracing::warn!(error = %error, "pending playback pipeline failed");
-            Self::stop_player(pending);
+            Self::stop_player(pending.player);
             return;
         }
         let ready = if self.paused {
@@ -332,27 +339,73 @@ impl Flow8Device {
             return;
         }
 
-        let handoff_position_ms = self
+        let active_position_ms = self
             .player
             .as_ref()
             .and_then(Self::player_position_ms)
-            .unwrap_or(self.pending_position_ms);
-        if let Err(error) = pending.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-            gst::ClockTime::from_mseconds(handoff_position_ms),
-        ) {
-            tracing::warn!(error = %error, "pending playback pipeline seek failed");
-            Self::stop_player(pending);
+            .unwrap_or(pending.target_position_ms);
+        if pending.seek_started_at.is_none() {
+            pending.target_position_ms = active_position_ms;
+            if active_position_ms > 0
+                && let Err(error) = pending.player.seek_simple(
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::ClockTime::from_mseconds(active_position_ms),
+                )
+            {
+                tracing::warn!(error = %error, "pending playback pipeline seek failed");
+                Self::stop_player(pending.player);
+                return;
+            }
+            pending.seek_started_at = Some(Instant::now());
+            self.pending_player = Some(pending);
             return;
         }
 
-        pending.set_property("volume", 1.0_f64);
+        let Some(candidate_position_ms) = Self::player_position_ms(&pending.player) else {
+            if pending
+                .seek_started_at
+                .is_some_and(|started_at| started_at.elapsed() >= PENDING_SEEK_TIMEOUT)
+            {
+                tracing::warn!("pending playback pipeline did not expose a position");
+                Self::stop_player(pending.player);
+            } else {
+                self.pending_player = Some(pending);
+            }
+            return;
+        };
+        let active_position_ms = self
+            .player
+            .as_ref()
+            .and_then(Self::player_position_ms)
+            .unwrap_or(pending.target_position_ms);
+        if candidate_position_ms.abs_diff(active_position_ms) > HANDOFF_TOLERANCE_MS {
+            if pending
+                .seek_started_at
+                .is_some_and(|started_at| started_at.elapsed() >= PENDING_SEEK_TIMEOUT)
+            {
+                tracing::warn!(
+                    candidate_position_ms,
+                    active_position_ms,
+                    "pending playback pipeline did not reach the handoff position"
+                );
+                Self::stop_player(pending.player);
+            } else {
+                self.pending_player = Some(pending);
+            }
+            return;
+        }
+
+        pending.player.set_property("volume", 1.0_f64);
+        let replacing_active = self.player.is_some();
         if let Some(active) = self.player.take() {
             active.set_property("volume", 0.0_f64);
             Self::stop_player(active);
         }
-        self.player = Some(pending);
-        self.seek_capture_cursors(handoff_position_ms * SAMPLE_RATE as u64 / 1_000);
+        self.player = Some(pending.player);
+        self.seek_capture_cursors(active_position_ms * SAMPLE_RATE as u64 / 1_000);
+        if !replacing_active {
+            self.pause_captures(self.paused);
+        }
     }
 
     fn encode_flac(raw_path: &std::path::Path, flac_path: &std::path::Path) -> Result<()> {
@@ -506,12 +559,22 @@ impl AudioDevice for Flow8Device {
                 self.stop_pending_player();
                 self.stop_active_player();
                 let position_ms = command.position_ms.unwrap_or(0);
-                let player = self.prepare_player(&path, position_ms, false, 1.0)?;
+                let player =
+                    self.prepare_player(&path, false, if position_ms == 0 { 1.0 } else { 0.0 })?;
                 self.seek_capture_cursors(position_ms * SAMPLE_RATE as u64 / 1_000);
                 self.paused = false;
-                self.pause_captures(false);
                 self.active_command_id = Some(command.command_id.clone());
-                self.player = Some(player);
+                if position_ms == 0 {
+                    self.pause_captures(false);
+                    self.player = Some(player);
+                } else {
+                    self.pause_captures(true);
+                    self.pending_player = Some(PendingPlayer {
+                        player,
+                        target_position_ms: position_ms,
+                        seek_started_at: None,
+                    });
+                }
             }
             PlaybackAction::Switch => {
                 if command.media_url.is_none() {
@@ -534,9 +597,12 @@ impl AudioDevice for Flow8Device {
                 }
                 self.stop_pending_switch();
                 self.stop_pending_player();
-                let player = self.prepare_player(&path, position_ms, self.paused, 0.0)?;
-                self.pending_position_ms = position_ms;
-                self.pending_player = Some(player);
+                let player = self.prepare_player(&path, self.paused, 0.0)?;
+                self.pending_player = Some(PendingPlayer {
+                    player,
+                    target_position_ms: position_ms,
+                    seek_started_at: None,
+                });
                 self.active_command_id = Some(command.command_id.clone());
             }
             PlaybackAction::Pause => {
@@ -544,8 +610,8 @@ impl AudioDevice for Flow8Device {
                 if let Some(player) = &self.player {
                     player.set_state(gst::State::Paused)?;
                 }
-                if let Some(player) = &self.pending_player {
-                    let _ = player.set_state(gst::State::Paused);
+                if let Some(pending) = &self.pending_player {
+                    let _ = pending.player.set_state(gst::State::Paused);
                 }
                 self.pause_captures(true);
             }
@@ -554,8 +620,8 @@ impl AudioDevice for Flow8Device {
                 if let Some(player) = &self.player {
                     player.set_state(gst::State::Playing)?;
                 }
-                if let Some(player) = &self.pending_player {
-                    let _ = player.set_state(gst::State::Playing);
+                if let Some(pending) = &self.pending_player {
+                    let _ = pending.player.set_state(gst::State::Playing);
                 }
                 self.pause_captures(false);
             }
