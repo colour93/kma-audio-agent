@@ -21,6 +21,10 @@ pub struct MixerState {
     pub mic2: ChannelState,
     pub music: LevelState,
     pub main: LevelState,
+    #[serde(default)]
+    pub mon1: Option<LevelState>,
+    #[serde(default)]
+    pub mon2: Option<LevelState>,
     pub reverb: ReverbState,
 }
 
