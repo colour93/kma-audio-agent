@@ -162,6 +162,8 @@ pub trait AudioDevice: Send {
     fn playback_state(&self) -> &'static str {
         "playing"
     }
+
+    fn poll(&mut self) {}
 }
 
 pub fn create_device(

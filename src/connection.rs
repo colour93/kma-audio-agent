@@ -354,8 +354,12 @@ async fn connect_and_run(
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut status = tokio::time::interval(Duration::from_millis(500));
+    let mut playback = tokio::time::interval(Duration::from_millis(20));
     loop {
         tokio::select! {
+            _ = playback.tick() => {
+                device.poll();
+            }
             _ = heartbeat.tick() => {
                 send_agent(&mut socket, &AgentMessage::Heartbeat {
                     schema_version: SCHEMA_VERSION,

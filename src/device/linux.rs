@@ -12,6 +12,7 @@ use std::{
 use alsa::{Direction, pcm::PCM};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app as gst_app;
 use midir::MidiOutput;
@@ -54,12 +55,18 @@ struct CaptureSession {
     manifest: SpoolManifest,
 }
 
+struct PendingSwitch {
+    download: tokio::task::JoinHandle<Result<PathBuf>>,
+    position_ms: u64,
+}
+
 pub struct Flow8Device {
     config: Config,
     server_url: String,
     token: String,
     client: reqwest::Client,
     player: Option<gst::Element>,
+    pending_switch: Option<PendingSwitch>,
     pending_player: Option<gst::Element>,
     pending_position_ms: u64,
     paused: bool,
@@ -77,6 +84,7 @@ impl Flow8Device {
             token,
             client: reqwest::Client::new(),
             player: None,
+            pending_switch: None,
             pending_player: None,
             pending_position_ms: 0,
             paused: true,
@@ -115,30 +123,54 @@ impl Flow8Device {
         Ok((output, port))
     }
 
-    async fn cache_media(&self, command: &PlaybackCommand) -> Result<PathBuf> {
-        let media_url = command
-            .media_url
-            .as_deref()
-            .ok_or_else(|| anyhow!("play command is missing mediaUrl"))?;
-        let url = url::Url::parse(&self.server_url)?.join(media_url)?;
+    fn media_cache_path(&self, command: &PlaybackCommand) -> PathBuf {
+        let media_url = command.media_url.as_deref().unwrap_or_default();
         let extension = if media_url.ends_with(".mp3") {
             "mp3"
         } else {
             "audio"
         };
         let asset_id = command.asset_id.as_deref().unwrap_or(&command.command_id);
-        let cache_dir = self.config.data_dir.join("cache");
-        tokio::fs::create_dir_all(&cache_dir).await?;
-        let target = cache_dir.join(format!("{asset_id}.{extension}"));
+        self.config
+            .data_dir
+            .join("cache")
+            .join(format!("{asset_id}.{extension}"))
+    }
+
+    async fn cache_media(&self, command: &PlaybackCommand) -> Result<PathBuf> {
+        let target = self.media_cache_path(command);
         if tokio::fs::try_exists(&target).await? {
             return Ok(target);
         }
+        Self::download_media(
+            self.client.clone(),
+            self.server_url.clone(),
+            self.token.clone(),
+            target,
+            command.media_url.clone(),
+        )
+        .await
+    }
+
+    async fn download_media(
+        client: reqwest::Client,
+        server_url: String,
+        token: String,
+        target: PathBuf,
+        media_url: Option<String>,
+    ) -> Result<PathBuf> {
+        let media_url = media_url
+            .as_deref()
+            .ok_or_else(|| anyhow!("play command is missing mediaUrl"))?;
+        let url = url::Url::parse(&server_url)?.join(media_url)?;
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
         let temporary = target.with_extension("part");
         let bytes = tokio::time::timeout(Duration::from_secs(30), async {
-            let response = self
-                .client
+            let response = client
                 .get(url)
-                .bearer_auth(&self.token)
+                .bearer_auth(token)
                 .header(reqwest::header::RANGE, "bytes=0-")
                 .send()
                 .await?
@@ -174,6 +206,26 @@ impl Flow8Device {
         }
     }
 
+    fn stop_pending_switch(&mut self) {
+        if let Some(pending) = self.pending_switch.take() {
+            pending.download.abort();
+        }
+    }
+
+    fn start_media_download(
+        &self,
+        command: &PlaybackCommand,
+    ) -> tokio::task::JoinHandle<Result<PathBuf>> {
+        let client = self.client.clone();
+        let server_url = self.server_url.clone();
+        let token = self.token.clone();
+        let target = self.media_cache_path(command);
+        let media_url = command.media_url.clone();
+        tokio::spawn(async move {
+            Self::download_media(client, server_url, token, target, media_url).await
+        })
+    }
+
     fn stop_active_player(&mut self) {
         if let Some(player) = self.player.take() {
             Self::stop_player(player);
@@ -183,7 +235,7 @@ impl Flow8Device {
     fn player_position_ms(player: &gst::Element) -> Option<u64> {
         player
             .query_position::<gst::ClockTime>()
-            .and_then(|position| position.mseconds())
+            .map(|position| position.mseconds())
     }
 
     fn create_player(&self, path: &std::path::Path, volume: f64) -> Result<gst::Element> {
@@ -226,6 +278,38 @@ impl Flow8Device {
             return Err(error);
         }
         Ok(player)
+    }
+
+    fn poll_pending_switch(&mut self) {
+        let Some(pending) = self.pending_switch.take() else {
+            return;
+        };
+        let PendingSwitch {
+            download,
+            position_ms,
+        } = pending;
+        if !download.is_finished() {
+            self.pending_switch = Some(PendingSwitch {
+                download,
+                position_ms,
+            });
+            return;
+        }
+        let Some(result) = (&mut download).now_or_never() else {
+            self.pending_switch = Some(PendingSwitch {
+                download,
+                position_ms,
+            });
+            return;
+        };
+        match result {
+            Ok(Ok(path)) => match self.prepare_player(&path, position_ms, self.paused, 0.0) {
+                Ok(player) => self.pending_player = Some(player),
+                Err(error) => tracing::warn!(error = %error, "failed to prepare downloaded source"),
+            },
+            Ok(Err(error)) => tracing::warn!(error = %error, "failed to download pending source"),
+            Err(error) => tracing::warn!(error = %error, "pending source task failed"),
+        }
     }
 
     fn promote_pending_player(&mut self) {
@@ -418,6 +502,7 @@ impl AudioDevice for Flow8Device {
         match command.action {
             PlaybackAction::Play => {
                 let path = self.cache_media(command).await?;
+                self.stop_pending_switch();
                 self.stop_pending_player();
                 self.stop_active_player();
                 let position_ms = command.position_ms.unwrap_or(0);
@@ -429,11 +514,25 @@ impl AudioDevice for Flow8Device {
                 self.player = Some(player);
             }
             PlaybackAction::Switch => {
-                let path = self.cache_media(command).await?;
+                if command.media_url.is_none() {
+                    return Err(anyhow!("switch command is missing mediaUrl"));
+                }
                 let position_ms = command
                     .position_ms
                     .or_else(|| self.player.as_ref().and_then(Self::player_position_ms))
                     .unwrap_or(0);
+                let path = self.media_cache_path(command);
+                if !tokio::fs::try_exists(&path).await? {
+                    self.stop_pending_switch();
+                    self.stop_pending_player();
+                    self.pending_switch = Some(PendingSwitch {
+                        download: self.start_media_download(command),
+                        position_ms,
+                    });
+                    self.active_command_id = Some(command.command_id.clone());
+                    return Ok(());
+                }
+                self.stop_pending_switch();
                 self.stop_pending_player();
                 let player = self.prepare_player(&path, position_ms, self.paused, 0.0)?;
                 self.pending_position_ms = position_ms;
@@ -471,6 +570,7 @@ impl AudioDevice for Flow8Device {
                 self.seek_capture_cursors(position_ms * SAMPLE_RATE as u64 / 1_000);
             }
             PlaybackAction::Stop | PlaybackAction::Next => {
+                self.stop_pending_switch();
                 self.stop_pending_player();
                 self.stop_active_player();
                 self.paused = true;
@@ -644,7 +744,7 @@ impl AudioDevice for Flow8Device {
     }
 
     fn anchor(&mut self) -> Option<(u64, u32, u64)> {
-        self.promote_pending_player();
+        self.poll();
         let player = self.player.as_ref()?;
         let position = player.query_position::<gst::ClockTime>()?;
         let frame = position.nseconds() * SAMPLE_RATE as u64 / 1_000_000_000;
@@ -656,13 +756,18 @@ impl AudioDevice for Flow8Device {
     }
 
     fn playback_state(&self) -> &'static str {
-        if self.pending_player.is_some() {
+        if self.pending_switch.is_some() || self.pending_player.is_some() {
             "buffering"
         } else if self.paused {
             "paused"
         } else {
             "playing"
         }
+    }
+
+    fn poll(&mut self) {
+        self.poll_pending_switch();
+        self.promote_pending_player();
     }
 }
 
