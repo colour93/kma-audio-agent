@@ -1,6 +1,7 @@
 [Unit]
 Description=KMA FLOW 8 Audio Agent
-After=network-online.target sound.target
+Requires=kma-server.service
+After=network-online.target sound.target kma-server.service
 Wants=network-online.target
 
 [Service]
