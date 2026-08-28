@@ -13,6 +13,8 @@ pub struct ChannelState {
     pub compressor_percent: f32,
     pub reverb_send_percent: f32,
     #[serde(default)]
+    pub delay_send_percent: f32,
+    #[serde(default)]
     pub mon1_send_db: Option<f32>,
     #[serde(default)]
     pub mon2_send_db: Option<f32>,
@@ -30,6 +32,8 @@ pub struct MixerState {
     #[serde(default)]
     pub mon2: Option<LevelState>,
     pub reverb: ReverbState,
+    #[serde(default)]
+    pub delay: DelayState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,6 +60,24 @@ pub struct ReverbState {
     pub preset: ReverbPreset,
     pub decay_percent: f32,
     pub return_level_db: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DelayState {
+    pub time_ms: u16,
+    pub feedback_percent: f32,
+    pub return_level_db: f32,
+}
+
+impl Default for DelayState {
+    fn default() -> Self {
+        Self {
+            time_ms: 110,
+            feedback_percent: 10.0,
+            return_level_db: -22.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

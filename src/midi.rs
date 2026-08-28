@@ -8,6 +8,9 @@ const MON1_BUS_CHANNEL: u8 = 8;
 const MON2_BUS_CHANNEL: u8 = 9;
 const FX1_BUS_CHANNEL: u8 = 10;
 const FX1_CONTROL_CHANNEL: u8 = 13;
+const FX2_BUS_CHANNEL: u8 = 11;
+const FX2_CONTROL_CHANNEL: u8 = 14;
+const FX2_SHORT_DELAY_PROGRAM: u8 = 10;
 const GLOBAL_CHANNEL: u8 = 15;
 
 pub fn db_to_cc(db: f32) -> u8 {
@@ -16,6 +19,10 @@ pub fn db_to_cc(db: f32) -> u8 {
 
 pub fn percent_to_cc(percent: f32) -> u8 {
     (percent.clamp(0.0, 100.0) * 1.27).round() as u8
+}
+
+fn delay_time_to_cc(time_ms: u16) -> u8 {
+    (((time_ms.clamp(20, 500) - 20) as f32 / 480.0) * 127.0).round() as u8
 }
 
 pub fn snapshot_program(slot: u8) -> [u8; 2] {
@@ -42,6 +49,11 @@ pub fn mixer_messages(state: &MixerState) -> Vec<Vec<u8>> {
             16,
             percent_to_cc(state.mic1.reverb_send_percent),
         ),
+        cc(
+            MIC1_CHANNEL,
+            17,
+            percent_to_cc(state.mic1.delay_send_percent),
+        ),
         cc(MIC2_CHANNEL, 7, db_to_cc(state.mic2.level_db)),
         cc(MIC2_CHANNEL, 5, bool_cc(state.mic2.muted)),
         cc(
@@ -53,6 +65,11 @@ pub fn mixer_messages(state: &MixerState) -> Vec<Vec<u8>> {
             MIC2_CHANNEL,
             16,
             percent_to_cc(state.mic2.reverb_send_percent),
+        ),
+        cc(
+            MIC2_CHANNEL,
+            17,
+            percent_to_cc(state.mic2.delay_send_percent),
         ),
         cc(MUSIC_CHANNEL, 7, db_to_cc(state.music.level_db)),
         cc(MUSIC_CHANNEL, 5, bool_cc(state.music.muted)),
@@ -68,6 +85,18 @@ pub fn mixer_messages(state: &MixerState) -> Vec<Vec<u8>> {
             percent_to_cc(state.reverb.decay_percent),
         ),
         cc(FX1_BUS_CHANNEL, 7, db_to_cc(state.reverb.return_level_db)),
+        program_change(FX2_CONTROL_CHANNEL, FX2_SHORT_DELAY_PROGRAM),
+        cc(
+            FX2_CONTROL_CHANNEL,
+            1,
+            delay_time_to_cc(state.delay.time_ms),
+        ),
+        cc(
+            FX2_CONTROL_CHANNEL,
+            2,
+            percent_to_cc(state.delay.feedback_percent),
+        ),
+        cc(FX2_BUS_CHANNEL, 7, db_to_cc(state.delay.return_level_db)),
     ];
     push_monitor_sends(
         &mut messages,
@@ -151,13 +180,14 @@ mod tests {
     #[test]
     fn maps_outputs_and_fx_to_flow8_channels() {
         let state: MixerState = serde_json::from_value(serde_json::json!({
-            "mic1": { "levelDb": -18, "muted": false, "compressorPercent": 35, "reverbSendPercent": 25, "mon1SendDb": -9, "mon2SendDb": -15 },
-            "mic2": { "levelDb": -18, "muted": false, "compressorPercent": 35, "reverbSendPercent": 25, "mon1SendDb": -10, "mon2SendDb": -16 },
+            "mic1": { "levelDb": -18, "muted": false, "compressorPercent": 35, "reverbSendPercent": 25, "delaySendPercent": 15, "mon1SendDb": -9, "mon2SendDb": -15 },
+            "mic2": { "levelDb": -18, "muted": false, "compressorPercent": 35, "reverbSendPercent": 25, "delaySendPercent": 20, "mon1SendDb": -10, "mon2SendDb": -16 },
             "music": { "levelDb": -6, "muted": false, "mon1SendDb": -11, "mon2SendDb": -17 },
             "main": { "levelDb": -3, "muted": false },
             "mon1": { "levelDb": -12, "muted": false },
             "mon2": { "levelDb": -20, "muted": true },
-            "reverb": { "preset": "chorus", "decayPercent": 50, "returnLevelDb": -12 }
+            "reverb": { "preset": "chorus", "decayPercent": 50, "returnLevelDb": -12 },
+            "delay": { "timeMs": 110, "feedbackPercent": 10, "returnLevelDb": -22 }
         }))
         .unwrap();
 
@@ -173,6 +203,10 @@ mod tests {
         assert!(messages.contains(&vec![0xB6, 15, db_to_cc(-17.0)]));
         assert!(messages.contains(&vec![0xCD, 14]));
         assert!(messages.contains(&vec![0xBA, 7, db_to_cc(-12.0)]));
+        assert!(messages.contains(&vec![0xCE, FX2_SHORT_DELAY_PROGRAM]));
+        assert!(messages.contains(&vec![0xBE, 1, delay_time_to_cc(110)]));
+        assert!(messages.contains(&vec![0xBE, 2, percent_to_cc(10.0)]));
+        assert!(messages.contains(&vec![0xBB, 7, db_to_cc(-22.0)]));
     }
 
     #[test]

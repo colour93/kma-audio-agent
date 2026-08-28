@@ -17,6 +17,15 @@ journalctl -u kma-audio-agent -f
 
 On first run, journald prints the pairing ID and one-time code. Approve that request from KMA Control. Credentials are stored with mode `0600` under `/var/lib/kma-audio-agent`.
 
+For separate development and production Servers, the existing `--config` option can select a complete profile:
+
+```bash
+kma-audio-agent --config /etc/kma-audio-agent/config.dev.toml run
+kma-audio-agent --config /etc/kma-audio-agent/config.prod.toml run
+```
+
+Each profile must use its own `data_dir`, because the stored Audio Agent credential belongs to one Server. Set `server_url` explicitly in both profiles rather than relying on mDNS when more than one Server is present.
+
 The release build must enable `linux-audio` and use the repository's generic `x86-64` rustflags:
 
 ```bash
